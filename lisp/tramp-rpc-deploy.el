@@ -742,7 +742,7 @@ never one authorized by stale provenance."
         (provenance-path (tramp-rpc-deploy--cache-provenance-path cache-path)))
     (unwind-protect
         (progn
-          (copy-file source temp-path t)
+          (copy-file (file-truename source) temp-path t)
           (set-file-modes temp-path #o755)
           (let ((digest (tramp-rpc-deploy--compute-checksum temp-path)))
             ;; Remove stale authority before changing the cache binary.
@@ -1239,7 +1239,7 @@ to inline encoding (base64 through the shell), which can be fragile."
                   ;; The atomically-created private directory guarantees that
                   ;; the destination does not exist.  Do not permit `copy-file'
                   ;; to follow or replace a pre-planted pathname.
-                  (copy-file local-path remote-tmp-path nil)
+                  (copy-file (file-truename local-path) remote-tmp-path nil)
 
                   (unless (tramp-send-command-and-check
                            vec

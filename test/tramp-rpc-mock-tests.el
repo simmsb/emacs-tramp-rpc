@@ -1090,7 +1090,9 @@ literally finds nothing."
           (should (alist-get 'spawn_not_found (plist-get missing-command :data)))
           (should (= (plist-get missing-cwd :code) -32004))
           (should (= (alist-get 'os_errno (plist-get missing-cwd :data)) 2))
-          (should-not (alist-get 'spawn_not_found (plist-get missing-cwd :data)))))
+          (should-not (alist-get 'spawn_not_found (plist-get missing-cwd :data)))
+          (should-not (alist-get 'cwd_not_directory (plist-get missing-command :data)))
+          (should (eq (alist-get 'cwd_not_directory (plist-get missing-cwd :data)) t))))
     (tramp-rpc-mock-test--stop-server)))
 
 (ert-deftest tramp-rpc-mock-test-server-process-signal-exit ()
@@ -8659,7 +8661,7 @@ This matches tramp-sh and upstream `tramp-test28-process-file', which requires
         (should (= (tramp-rpc-handle-process-file "cmd" nil nil nil) 128))))))
 
 (ert-deftest tramp-rpc-mock-test-process-file-preserves-other-rpc-errors ()
-  "A process cwd ENOENT remains a remote-file-error, not status 127."
+  "A process ENOENT with neither marker remains a remote-file-error."
   (skip-unless tramp-rpc-mock-test--tramp-rpc-loaded)
   (let ((default-directory "/rpc:user@host:/work/")
         invalidated-directory)
@@ -8682,6 +8684,69 @@ This matches tramp-sh and upstream `tramp-test28-process-file', which requires
                     :type 'remote-file-error)
       (should (equal invalidated-directory
                      (tramp-dissect-file-name default-directory))))))
+
+(ert-deftest tramp-rpc-mock-test-process-file-unusable-cwd-is-cd-failure ()
+  "A cwd the server marks as not a directory is a failed `cd', like tramp-sh.
+`process-file' returns status 1 and writes a shell-style diagnostic to the
+stderr destination instead of signalling."
+  (skip-unless tramp-rpc-mock-test--tramp-rpc-loaded)
+  (let ((default-directory "/rpc:user@host:/work/a_file.py/")
+        (stderr-file (make-temp-file "tramp-rpc-stderr")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'tramp-rpc--cached-remote-path)
+                   (lambda (_vec) '("/usr/bin")))
+                  ((symbol-function 'tramp-rpc--get-direnv-environment)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'tramp-rpc--caller-environment)
+                   (lambda () nil))
+                  ((symbol-function 'tramp-rpc-magit--process-cache-lookup)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'tramp-rpc--clear-file-caches-for-connection)
+                   #'ignore)
+                  ((symbol-function 'tramp-rpc--call)
+                   (lambda (&rest _)
+                     (tramp-rpc--signal-rpc-error
+                      "RPC" "Failed to spawn process"
+                      tramp-rpc-protocol-error-process 20 nil
+                      '((os_errno . 20) (spawn_not_found . :msgpack-false)
+                        (cwd_not_directory . t))))))
+          (should (= (tramp-rpc-handle-process-file
+                      "pwd" nil (list nil stderr-file) nil)
+                     1))
+          (with-temp-buffer
+            (insert-file-contents stderr-file)
+            (should (equal (buffer-string)
+                           "cd: /work/a_file.py/: Not a directory\n"))))
+      (ignore-errors (delete-file stderr-file)))))
+
+(ert-deftest tramp-rpc-mock-test-process-file-expands-default-directory ()
+  "`process-file' never sends an empty or relative cwd to the server.
+Like `tramp-skeleton-process-file', \"/rpc:host:\" and relative localnames
+resolve below the remote home directory."
+  (skip-unless tramp-rpc-mock-test--tramp-rpc-loaded)
+  (let ((process-file-side-effects nil)
+        cwds)
+    (cl-letf (((symbol-function 'tramp-rpc--cached-remote-path)
+               (lambda (_vec) '("/usr/bin")))
+              ((symbol-function 'tramp-rpc--get-direnv-environment)
+               (lambda (&rest _) nil))
+              ((symbol-function 'tramp-rpc--caller-environment)
+               (lambda () nil))
+              ((symbol-function 'tramp-rpc-magit--process-cache-lookup)
+               (lambda (&rest _) nil))
+              ((symbol-function 'tramp-rpc-magit--process-cache-store)
+               #'ignore)
+              ;; Resolve "~" without a connection.
+              ((symbol-function 'tramp-get-home-directory)
+               (lambda (&rest _) "/home/user"))
+              ((symbol-function 'tramp-rpc--call)
+               (lambda (_vec _method params)
+                 (push (alist-get 'cwd params) cwds)
+                 '((exit_code . 0) (stdout . "") (stderr . "")))))
+      (dolist (directory '("/rpc:user@host:" "/rpc:user@host:foo/bar/"))
+        (let ((default-directory directory))
+          (should (= (tramp-rpc-handle-process-file "pwd" nil nil nil) 0)))))
+    (should (equal (nreverse cwds) '("/home/user" "/home/user/foo/bar/")))))
 
 (ert-deftest tramp-rpc-mock-test-process-file-passes-tramp-remote-environment ()
   "Test `process-file' forwards dynamic TRAMP remote process env vars."

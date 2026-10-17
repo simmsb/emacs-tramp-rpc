@@ -81,6 +81,9 @@ decoded parameters.  Notifications nobody handles are discarded.")
 (define-error 'tramp-rpc-incompatible-server
   "TRAMP-RPC server protocol is incompatible" 'remote-file-error)
 
+(define-error 'tramp-rpc-process-cwd-error
+  "Process working directory is missing or not a directory" 'remote-file-error)
+
 (defcustom tramp-rpc-call-timeout 30
   "Maximum seconds to wait for a synchronous RPC call to complete.
 The value must be a positive number."
@@ -1636,6 +1639,17 @@ MESSAGE describes the error."
          (eq (alist-get 'spawn_not_found data) t))
     (signal 'file-missing
             (tramp-rpc--error-args operation "No such file" message filename data)))
+   ;; The server also marks a spawn that failed because its cwd is missing
+   ;; or not a directory; `process-file' reports that like a failed `cd'.
+   ((and (= code tramp-rpc-protocol-error-process)
+         (eq (alist-get 'cwd_not_directory data) t))
+    ;; Carry only the shell-style reason; `process-file' prefixes "cd: DIR".
+    (signal 'tramp-rpc-process-cwd-error
+            (list (pcase os-errno
+                    (2 "No such file or directory")
+                    (13 "Permission denied")
+                    (20 "Not a directory")
+                    (_ message)))))
    ((and (not (= code tramp-rpc-protocol-error-process))
          (eql os-errno 2)) ; ENOENT
     (signal 'file-missing

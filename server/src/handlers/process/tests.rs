@@ -817,6 +817,10 @@ async fn process_spawn_not_found_preserves_errno() {
         map_get(error.data.as_ref().unwrap(), "spawn_not_found"),
         Some(&Value::Boolean(true))
     );
+    assert_eq!(
+        map_get(error.data.as_ref().unwrap(), "cwd_not_directory"),
+        Some(&Value::Boolean(false))
+    );
 }
 
 #[tokio::test]
@@ -844,6 +848,43 @@ async fn process_spawn_missing_cwd_is_not_command_not_found() {
     assert_eq!(
         map_get(error.data.as_ref().unwrap(), "spawn_not_found"),
         Some(&Value::Boolean(false))
+    );
+    assert_eq!(
+        map_get(error.data.as_ref().unwrap(), "cwd_not_directory"),
+        Some(&Value::Boolean(true))
+    );
+}
+
+#[tokio::test]
+async fn process_spawn_file_cwd_is_marked_not_directory() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let file_cwd = tmp.path().join("a_file.py");
+    std::fs::write(&file_cwd, b"").unwrap();
+    let error = run(Value::Map(vec![
+        (
+            Value::String("cmd".into()),
+            Value::String("/bin/true".into()),
+        ),
+        (
+            Value::String("cwd".into()),
+            Value::String(file_cwd.to_string_lossy().into_owned().into()),
+        ),
+    ]))
+    .await
+    .expect_err("file cwd should fail to spawn");
+
+    assert_eq!(error.code, RpcError::PROCESS_ERROR);
+    assert_eq!(
+        map_get(error.data.as_ref().unwrap(), "os_errno").and_then(Value::as_i64),
+        Some(i64::from(libc::ENOTDIR))
+    );
+    assert_eq!(
+        map_get(error.data.as_ref().unwrap(), "spawn_not_found"),
+        Some(&Value::Boolean(false))
+    );
+    assert_eq!(
+        map_get(error.data.as_ref().unwrap(), "cwd_not_directory"),
+        Some(&Value::Boolean(true))
     );
 }
 

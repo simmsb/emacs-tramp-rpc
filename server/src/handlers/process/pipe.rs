@@ -137,7 +137,7 @@ pub(super) fn executable_is_missing_sync(
     env: Option<&HashMap<String, String>>,
     clear_env: bool,
 ) -> bool {
-    if cwd.is_some_and(|dir| !Path::new(&expand_tilde(dir)).is_dir()) {
+    if cwd_is_not_directory(cwd) {
         return false;
     }
 
@@ -163,23 +163,52 @@ pub(super) fn executable_is_missing_sync(
     })
 }
 
-pub(super) async fn executable_is_missing(
+/// Return true when CWD is given but does not name a directory.
+pub(super) fn cwd_is_not_directory(cwd: Option<&str>) -> bool {
+    cwd.is_some_and(|dir| !Path::new(&expand_tilde(dir)).is_dir())
+}
+
+/// Why a spawn failed, as far as the filesystem can tell afterwards.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct SpawnDiagnosis {
+    /// The requested working directory is missing or not a directory.
+    pub(super) cwd_not_directory: bool,
+    /// The executable is missing; never set when the cwd is unusable.
+    pub(super) executable_missing: bool,
+}
+
+pub(super) async fn diagnose_spawn_failure(
     command: &str,
     cwd: Option<&str>,
     env: Option<&HashMap<String, String>>,
     clear_env: bool,
-) -> bool {
+) -> SpawnDiagnosis {
     let command = command.to_owned();
     let cwd = cwd.map(str::to_owned);
     let env = env.cloned();
     tokio::task::spawn_blocking(move || {
-        executable_is_missing_sync(&command, cwd.as_deref(), env.as_ref(), clear_env)
+        if cwd_is_not_directory(cwd.as_deref()) {
+            SpawnDiagnosis {
+                cwd_not_directory: true,
+                executable_missing: false,
+            }
+        } else {
+            SpawnDiagnosis {
+                cwd_not_directory: false,
+                executable_missing: executable_is_missing_sync(
+                    &command,
+                    cwd.as_deref(),
+                    env.as_ref(),
+                    clear_env,
+                ),
+            }
+        }
     })
     .await
-    .unwrap_or(false)
+    .unwrap_or_default()
 }
 
-pub(super) fn spawn_error(error: std::io::Error, executable_missing: bool) -> RpcError {
+pub(super) fn spawn_error(error: std::io::Error, diagnosis: SpawnDiagnosis) -> RpcError {
     let mut data = Vec::new();
     if let Some(errno) = error.raw_os_error() {
         data.push((
@@ -189,7 +218,13 @@ pub(super) fn spawn_error(error: std::io::Error, executable_missing: bool) -> Rp
     }
     data.push((
         Value::String("spawn_not_found".into()),
-        Value::Boolean(error.kind() == ErrorKind::NotFound && executable_missing),
+        Value::Boolean(error.kind() == ErrorKind::NotFound && diagnosis.executable_missing),
+    ));
+    // Shell-based TRAMP reports an unusable working directory as a failed
+    // `cd' (exit status 1) rather than an error; mark it so clients can too.
+    data.push((
+        Value::String("cwd_not_directory".into()),
+        Value::Boolean(diagnosis.cwd_not_directory),
     ));
     RpcError {
         code: RpcError::PROCESS_ERROR,
@@ -482,9 +517,9 @@ pub(super) async fn run_with_output_limit(params: Value, output_limit: usize) ->
         Ok(result) => Ok(result.into_value()),
         Err(ChildError::Spawn(error)) => {
             let (cmd, cwd, clear_env) = probe;
-            let executable_missing =
-                executable_is_missing(&cmd, cwd.as_deref(), env.as_deref(), clear_env).await;
-            Err(spawn_error(error, executable_missing))
+            let diagnosis =
+                diagnose_spawn_failure(&cmd, cwd.as_deref(), env.as_deref(), clear_env).await;
+            Err(spawn_error(error, diagnosis))
         }
         Err(ChildError::Setup(error) | ChildError::Io(error)) => {
             Err(RpcError::process_error(error.to_string()))
@@ -548,14 +583,14 @@ pub async fn start(params: Value) -> HandlerResult {
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let executable_missing = executable_is_missing(
+            let diagnosis = diagnose_spawn_failure(
                 &params.cmd,
                 params.cwd.as_deref(),
                 params.env.as_ref(),
                 params.clear_env,
             )
             .await;
-            return Err(spawn_error(error, executable_missing));
+            return Err(spawn_error(error, diagnosis));
         }
     };
     let child_pid = child

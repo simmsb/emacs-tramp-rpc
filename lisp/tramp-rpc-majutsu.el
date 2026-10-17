@@ -57,11 +57,18 @@ result cannot fill, so prefetching would only add round trips."
   (with-temp-buffer
     (majutsu--process-file-supported-p nil (list t (current-buffer)))))
 
+(defun tramp-rpc-majutsu--cwd ()
+  "Return the remote working directory for `default-directory'.
+Expand first: `file-remote-p' leaves \"/rpc:host:\" and relative
+localnames unexpanded, which would reach the server as an empty or
+relative cwd."
+  (tramp-file-local-name (expand-file-name default-directory)))
+
 (defun tramp-rpc-majutsu--environment (vec args)
   "Return Majutsu's effective remote environment for ARGS on VEC."
   (let ((process-environment (majutsu-process-environment args)))
     (tramp-rpc--process-environment
-     vec (file-remote-p default-directory 'localname))))
+     vec (tramp-rpc-majutsu--cwd))))
 
 (defun tramp-rpc-majutsu--key (program args env)
   "Identify an exact PROGRAM invocation with ARGS and ENV."
@@ -70,7 +77,7 @@ result cannot fill, so prefetching would only add round trips."
 (defun tramp-rpc-majutsu--entry (key program args)
   "Build a batch entry for KEY, PROGRAM and ARGS in the current workspace."
   `((key . ,key) (cmd . ,program) (args . ,(vconcat args))
-    (cwd . ,(file-remote-p default-directory 'localname))))
+    (cwd . ,(tramp-rpc-majutsu--cwd))))
 
 (defun tramp-rpc-majutsu--result (results key)
   "Find KEY in decoded batch RESULTS."

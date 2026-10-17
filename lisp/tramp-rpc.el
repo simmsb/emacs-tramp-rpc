@@ -2214,131 +2214,143 @@ INFILE is the input file name.
 DESTINATION controls where standard output and error are sent, as for
 `process-file'.
 ARGS contains the original function arguments."
-  (with-parsed-tramp-file-name default-directory nil
-    ;; Unquote localname in case of file-name-quoted paths (e.g. /: prefix).
-    (setq localname (file-name-unquote localname))
-    ;; Try serving from magit prefetch cache first (no RPC needed)
-    (let* ((cache-output-p (and (null infile)
-                                (tramp-rpc--process-file-cache-output-p destination)))
-           (cached (when cache-output-p
-                     (tramp-rpc-magit--process-cache-lookup program args))))
-      (if cached
-          ;; Cache hit - serve from prefetch
-          (let ((exit-code (car cached))
-                (stdout (cdr cached)))
-            (tramp-rpc--route-process-file-output destination stdout)
-            exit-code)
-        ;; Cache miss - make actual RPC call.  Leave relative PROGRAM names
-        ;; unresolved so the server's process launcher searches the PATH we pass
-        ;; below, matching `tramp-remote-path' order.
-        (let* (;; Like TRAMP's process handlers, pass only the remote-relevant
-               ;; environment.  The PATH entry comes from `tramp-remote-path'
-               ;; (or deprecated `tramp-rpc-remote-path').  Shell commands also
-               ;; retain login-shell entries, matching tramp-sh; direnv and
-               ;; dynamic caller variables keep their previous roles and
-               ;; override it.
-               (env (tramp-rpc--process-environment
-                     v localname (equal program shell-file-name)))
-               (stdin-content (when (and infile (not (eq infile t)))
-                                (with-temp-buffer
-                                  (set-buffer-multibyte nil)
-                                  (insert-file-contents-literally infile)
-                                  (buffer-string)))))
-          ;; Clear after every RPC exit when Emacs says the command may have side
-          ;; effects.  This includes decoding, prefetch, and output-routing
-          ;; failures, and prevents metadata cached while the command ran from
-          ;; surviving it.
-          (unwind-protect
-              (let ((result
-                     (condition-case err
-                         (tramp-rpc--call
-                          v "process.run"
-                          `((cmd . ,program)
-                            (args . ,(vconcat args))
-                            (cwd . ,localname)
-                            (env . ,env)
-                            ;; Discarded output does not need a merged stream.
-                            ;; Keep stdout separate so exit-code-only Magit
-                            ;; calls can still populate the stdout-only cache.
-                            ,@(when (and destination
-                                         (tramp-rpc--process-file-merge-output-p
-                                          destination))
-                                '((merge_stderr . t)))
-                            ,@(when stdin-content
-                                `((stdin . ,stdin-content)))))
-                       ;; The server marks confirmed spawn ENOENT as
-                       ;; `file-missing'.  Shell-based TRAMP returns status
-                       ;; 127 and leaves the diagnostic on stderr, so preserve
-                       ;; both parts of that contract for split destinations.
-                       (file-missing
-                        (tramp-rpc--route-process-file-output
-                         destination "" (concat (error-message-string err) "\n"))
-                        127))))
-                (if (eq result 127)
-                    127
-                  (if result
-                      (let ((exit-code (alist-get 'exit_code result))
-                            (exit-signal (alist-get 'signal result))
-                            (stdout (tramp-rpc--decode-output
-                                     (alist-get 'stdout result)))
-                            (stderr (tramp-rpc--decode-output
-                                     (alist-get 'stderr result))))
+  ;; Like `tramp-skeleton-process-file', expand first: "/rpc:host:" and
+  ;; relative localnames name directories below the remote home, and must
+  ;; not reach the server as an empty or relative cwd.
+  (let ((default-directory (expand-file-name default-directory)))
+    (with-parsed-tramp-file-name default-directory nil
+      ;; Unquote localname in case of file-name-quoted paths (e.g. /: prefix).
+      (setq localname (file-name-unquote localname))
+      ;; Try serving from magit prefetch cache first (no RPC needed)
+      (let* ((cache-output-p (and (null infile)
+                                  (tramp-rpc--process-file-cache-output-p destination)))
+             (cached (when cache-output-p
+                       (tramp-rpc-magit--process-cache-lookup program args))))
+        (if cached
+            ;; Cache hit - serve from prefetch
+            (let ((exit-code (car cached))
+                  (stdout (cdr cached)))
+              (tramp-rpc--route-process-file-output destination stdout)
+              exit-code)
+          ;; Cache miss - make actual RPC call.  Leave relative PROGRAM names
+          ;; unresolved so the server's process launcher searches the PATH we pass
+          ;; below, matching `tramp-remote-path' order.
+          (let* (;; Like TRAMP's process handlers, pass only the remote-relevant
+                 ;; environment.  The PATH entry comes from `tramp-remote-path'
+                 ;; (or deprecated `tramp-rpc-remote-path').  Shell commands also
+                 ;; retain login-shell entries, matching tramp-sh; direnv and
+                 ;; dynamic caller variables keep their previous roles and
+                 ;; override it.
+                 (env (tramp-rpc--process-environment
+                       v localname (equal program shell-file-name)))
+                 (stdin-content (when (and infile (not (eq infile t)))
+                                  (with-temp-buffer
+                                    (set-buffer-multibyte nil)
+                                    (insert-file-contents-literally infile)
+                                    (buffer-string)))))
+            ;; Clear after every RPC exit when Emacs says the command may have side
+            ;; effects.  This includes decoding, prefetch, and output-routing
+            ;; failures, and prevents metadata cached while the command ran from
+            ;; surviving it.
+            (unwind-protect
+                (let ((result
+                       (condition-case err
+                           (tramp-rpc--call
+                            v "process.run"
+                            `((cmd . ,program)
+                              (args . ,(vconcat args))
+                              (cwd . ,localname)
+                              (env . ,env)
+                              ;; Discarded output does not need a merged stream.
+                              ;; Keep stdout separate so exit-code-only Magit
+                              ;; calls can still populate the stdout-only cache.
+                              ,@(when (and destination
+                                           (tramp-rpc--process-file-merge-output-p
+                                            destination))
+                                  '((merge_stderr . t)))
+                              ,@(when stdin-content
+                                  `((stdin . ,stdin-content)))))
+                         ;; The server marks confirmed spawn ENOENT as
+                         ;; `file-missing'.  Shell-based TRAMP returns status
+                         ;; 127 and leaves the diagnostic on stderr, so preserve
+                         ;; both parts of that contract for split destinations.
+                         (file-missing
+                          (tramp-rpc--route-process-file-output
+                           destination "" (concat (error-message-string err) "\n"))
+                          127)
+                         ;; Shell-based TRAMP runs `cd DIR && PROGRAM', so a
+                         ;; working directory that is missing or not a
+                         ;; directory yields status 1 and a diagnostic.
+                         (tramp-rpc-process-cwd-error
+                          (tramp-rpc--route-process-file-output
+                           destination ""
+                           (format "cd: %s: %s\n" localname (cadr err)))
+                          1))))
+                  (if (integerp result)
+                      result
+                    (if result
+                        (let ((exit-code (alist-get 'exit_code result))
+                              (exit-signal (alist-get 'signal result))
+                              (stdout (tramp-rpc--decode-output
+                                       (alist-get 'stdout result)))
+                              (stderr (tramp-rpc--decode-output
+                                       (alist-get 'stderr result))))
 
-                        ;; Never let merged diagnostics poison stdout-only
-                        ;; cache entries used by subsequent Magit calls.
-                        (when cache-output-p
-                          (tramp-rpc-magit--process-cache-store
-                           program args exit-code stdout))
+                          ;; Never let merged diagnostics poison stdout-only
+                          ;; cache entries used by subsequent Magit calls.
+                          (when cache-output-p
+                            (tramp-rpc-magit--process-cache-store
+                             program args exit-code stdout))
 
-                        ;; Let the real `update-index --refresh' run, then
-                        ;; build the read snapshot used by later Magit calls.
-                        ;; It exits 1 when tracked files need an update, which
-                        ;; is the usual state of a worktree with changes.
-                        (when (and
-                               (null infile)
-                               (bound-and-true-p
-                                tramp-rpc-magit--allow-process-cache)
-                               (or (string-suffix-p "/git" program)
-                                   (string= "git" program))
-                               (memql exit-code '(0 1))
-                               (tramp-rpc-magit--git-cache-safe-environment-p))
-                          (let ((core-args
-                                 (tramp-rpc-magit--strip-git-prefix-args args)))
-                            (when (and
-                                   (equal (car core-args) "update-index")
-                                   (member "--refresh" core-args))
-                              (tramp-rpc-magit--clear-status-cache-for-connection v)
-                              (tramp-rpc-magit--prefetch default-directory))))
+                          ;; Let the real `update-index --refresh' run, then
+                          ;; build the read snapshot used by later Magit calls.
+                          ;; It exits 1 when tracked files need an update, which
+                          ;; is the usual state of a worktree with changes.
+                          (when (and
+                                 (null infile)
+                                 (bound-and-true-p
+                                  tramp-rpc-magit--allow-process-cache)
+                                 (or (string-suffix-p "/git" program)
+                                     (string= "git" program))
+                                 (memql exit-code '(0 1))
+                                 (tramp-rpc-magit--git-cache-safe-environment-p))
+                            (let ((core-args
+                                   (tramp-rpc-magit--strip-git-prefix-args args)))
+                              (when (and
+                                     (equal (car core-args) "update-index")
+                                     (member "--refresh" core-args))
+                                (tramp-rpc-magit--clear-status-cache-for-connection v)
+                                (tramp-rpc-magit--prefetch default-directory))))
 
-                        (tramp-rpc--route-process-file-output
-                         destination stdout stderr)
+                          (tramp-rpc--route-process-file-output
+                           destination stdout stderr)
 
-                        ;; `process-file' returns the raw exit code unless the
-                        ;; caller opts into signal descriptions via
-                        ;; `process-file-return-signal-string'.  This matches
-                        ;; tramp-sh and upstream `tramp-test28-process-file',
-                        ;; which requires the integer 128 + signal by default.
-                        (cond
-                         ((not (bound-and-true-p
-                                process-file-return-signal-string))
-                          exit-code)
-                         ((natnump exit-signal)
-                          (aref (tramp-rpc--get-signal-strings v) exit-signal))
-                         ;; Like tramp-sh, describe other exits above 128 as
-                         ;; signals when opted in.  Exit 128 is not a signal.
-                         ((and (natnump exit-code) (> exit-code 128))
-                          (aref (tramp-rpc--get-signal-strings v)
-                                (- exit-code 128)))
-                         (t exit-code)))
-                    ;; A successful RPC result is always non-nil.
-                    (signal 'remote-file-error
-                            (list "Empty process.run response")))))
-            ;; Any external command may mutate the filesystem, and watcher
-            ;; delivery is asynchronous.  Honor Emacs' conservative default;
-            ;; callers with a proven read-only scope can bind
-            ;; `process-file-side-effects' to nil.
-            (when process-file-side-effects
-              (tramp-rpc--clear-file-caches-for-connection v))))))))
+                          ;; `process-file' returns the raw exit code unless the
+                          ;; caller opts into signal descriptions via
+                          ;; `process-file-return-signal-string'.  This matches
+                          ;; tramp-sh and upstream `tramp-test28-process-file',
+                          ;; which requires the integer 128 + signal by default.
+                          (cond
+                           ((not (bound-and-true-p
+                                  process-file-return-signal-string))
+                            exit-code)
+                           ((natnump exit-signal)
+                            (aref (tramp-rpc--get-signal-strings v) exit-signal))
+                           ;; Like tramp-sh, describe other exits above 128 as
+                           ;; signals when opted in.  Exit 128 is not a signal.
+                           ((and (natnump exit-code) (> exit-code 128))
+                            (aref (tramp-rpc--get-signal-strings v)
+                                  (- exit-code 128)))
+                           (t exit-code)))
+                      ;; A successful RPC result is always non-nil.
+                      (signal 'remote-file-error
+                              (list "Empty process.run response")))))
+              ;; Any external command may mutate the filesystem, and watcher
+              ;; delivery is asynchronous.  Honor Emacs' conservative default;
+              ;; callers with a proven read-only scope can bind
+              ;; `process-file-side-effects' to nil.
+              (when process-file-side-effects
+                (tramp-rpc--clear-file-caches-for-connection v)))))))))
 
 (defun tramp-rpc-handle-vc-registered (file)
   "Like `vc-registered' for TRAMP-RPC files.

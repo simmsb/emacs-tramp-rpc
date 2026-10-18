@@ -2226,7 +2226,7 @@ Connection-local values are honored, matching `tramp-get-remote-path'."
 Signals when VEC cannot be reached."
   (let* ((result (tramp-rpc--call vec "process.run"
                                   `((cmd . "/bin/sh")
-                                    (args . ["-c" "getconf PATH 2>/dev/null"])
+                                    (args . ["-c" "echo $PATH 2>/dev/null"])
                                     (cwd . "/"))))
          (exit-code (alist-get 'exit_code result))
          (stdout (tramp-rpc--decode-output
